@@ -2,6 +2,8 @@
 #include <cassert>
 #include <iostream>
 #include <thread>
+#include <string>
+#include <set>
 
 #include <unistd.h>
 #include "msgq/visionipc/visionipc.h"
@@ -12,15 +14,19 @@
 static int connect_to_vipc_server(const std::string &name, bool blocking) {
   const std::string ipc_path = get_ipc_path(name);
   int socket_fd = ipc_connect(ipc_path.c_str());
+  bool logged_retry = false;
   while (socket_fd < 0 && blocking) {
-    std::cout << "VisionIpcClient connecting" << std::endl;
-    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    if (!logged_retry) {
+      std::cout << "VisionIpcClient connecting" << std::endl;
+      logged_retry = true;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
     socket_fd = ipc_connect(ipc_path.c_str());
   }
   return socket_fd;
 }
 
-VisionIpcClient::VisionIpcClient(std::string name, VisionStreamType type, bool conflate, cl_device_id device_id, cl_context ctx) : name(name), type(type), device_id(device_id), ctx(ctx) {
+VisionIpcClient::VisionIpcClient(std::string name_, VisionStreamType type_, bool conflate) : name(name_), type(type_) {
   msg_ctx = Context::create();
   sock = SubSocket::create(msg_ctx, get_endpoint_name(name, type), "127.0.0.1", conflate, false);
 
@@ -29,11 +35,11 @@ VisionIpcClient::VisionIpcClient(std::string name, VisionStreamType type, bool c
 }
 
 // Connect is not thread safe. Do not use the buffers while calling connect
-bool VisionIpcClient::connect(bool blocking){
+bool VisionIpcClient::connect(bool blocking) {
   connected = false;
 
   // Cleanup old buffers on reconnect
-  for (size_t i = 0; i < num_buffers; i++){
+  for (size_t i = 0; i < num_buffers; i++) {
     if (buffers[i].free() != 0) {
       LOGE("Failed to free buffer %zu", i);
     }
@@ -50,8 +56,8 @@ bool VisionIpcClient::connect(bool blocking){
   assert(r == sizeof(type));
 
   // Get FDs
-  int fds[VISIONIPC_MAX_FDS];
-  VisionBuf bufs[VISIONIPC_MAX_FDS];
+  int fds[VISIONIPC_MAX_FDS] = {};
+  VisionBuf bufs[VISIONIPC_MAX_FDS] = {};
   r = ipc_sendrecv_with_fds(false, socket_fd, &bufs, sizeof(bufs), fds, VISIONIPC_MAX_FDS, &num_buffers);
   if (r < 0) {
     // only expected error is server shutting down
@@ -64,13 +70,11 @@ bool VisionIpcClient::connect(bool blocking){
   assert(r == sizeof(VisionBuf) * num_buffers);
 
   // Import buffers
-  for (size_t i = 0; i < num_buffers; i++){
+  for (size_t i = 0; i < num_buffers; i++) {
     buffers[i] = bufs[i];
     buffers[i].fd = fds[i];
     buffers[i].import();
     buffers[i].init_yuv(buffers[i].width, buffers[i].height, buffers[i].stride, buffers[i].uv_offset);
-
-    if (device_id) buffers[i].init_cl(device_id, ctx);
   }
 
   close(socket_fd);
@@ -78,15 +82,15 @@ bool VisionIpcClient::connect(bool blocking){
   return true;
 }
 
-VisionBuf * VisionIpcClient::recv(VisionIpcBufExtra * extra, const int timeout_ms){
+VisionBuf * VisionIpcClient::recv(VisionIpcBufExtra * extra, const int timeout_ms) {
   auto p = poller->poll(timeout_ms);
 
-  if (!p.size()){
+  if (!p.size()) {
     return nullptr;
   }
 
   Message * r = sock->receive(true);
-  if (r == nullptr){
+  if (r == nullptr) {
     return nullptr;
   }
 
@@ -94,10 +98,16 @@ VisionBuf * VisionIpcClient::recv(VisionIpcBufExtra * extra, const int timeout_m
   assert(r->getSize() == sizeof(VisionIpcPacket));
   VisionIpcPacket *packet = (VisionIpcPacket*)r->getData();
 
-  assert(packet->idx < num_buffers);
+  // Check if packet index is out of bounds, indicating server has changed
+  if (packet->idx >= num_buffers) {
+    connected = false;
+    delete r;
+    return nullptr;
+  }
+
   VisionBuf * buf = &buffers[packet->idx];
 
-  if (buf->server_id != packet->server_id){
+  if (buf->server_id != packet->server_id) {
     connected = false;
     delete r;
     return nullptr;
@@ -139,8 +149,8 @@ std::set<VisionStreamType> VisionIpcClient::getAvailableStreams(const std::strin
   return std::set<VisionStreamType>(available_streams, available_streams + r / sizeof(VisionStreamType));
 }
 
-VisionIpcClient::~VisionIpcClient(){
-  for (size_t i = 0; i < num_buffers; i++){
+VisionIpcClient::~VisionIpcClient() {
+  for (size_t i = 0; i < num_buffers; i++) {
     if (buffers[i].free() != 0) {
       LOGE("Failed to free buffer %zu", i);
     }

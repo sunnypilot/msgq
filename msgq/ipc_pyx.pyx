@@ -1,7 +1,7 @@
 # distutils: language = c++
 # cython: c_string_encoding=ascii, language_level=3
 
-import sys
+import time
 from libcpp.string cimport string
 from libcpp.vector cimport vector
 from libcpp cimport bool
@@ -54,9 +54,6 @@ def wait_for_one_event(list events, int timeout=-1):
 
 cdef class Event:
   cdef cppEvent event;
-
-  def __cinit__(self):
-    pass
 
   cdef setEvent(self, cppEvent event):
     self.event = event
@@ -186,10 +183,10 @@ cdef class SubSocket:
     self.is_owner = False
     self.socket = ptr
 
-  def connect(self, Context context, string endpoint, string address=b"127.0.0.1", bool conflate=False):
+  def connect(self, Context context, string endpoint, string address=b"127.0.0.1", bool conflate=False, size_t segment_size=0):
     cdef int r
     with nogil:
-      r = self.socket.connect(context.context, endpoint, address, conflate)
+      r = self.socket.connect(context.context, endpoint, address, conflate, True, segment_size)
 
     if r != 0:
       if errno.errno == errno.EADDRINUSE:
@@ -228,8 +225,8 @@ cdef class PubSocket:
   def __dealloc__(self):
     del self.socket
 
-  def connect(self, Context context, string endpoint):
-    r = self.socket.connect(context.context, endpoint)
+  def connect(self, Context context, string endpoint, size_t segment_size=0):
+    r = self.socket.connect(context.context, endpoint, True, segment_size)
 
     if r != 0:
       if errno.errno == errno.EADDRINUSE:
@@ -249,3 +246,11 @@ cdef class PubSocket:
 
   def all_readers_updated(self):
     return self.socket.all_readers_updated()
+
+  def wait_for_readers(self, double timeout=1.0, double interval=0.001):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+      if self.all_readers_updated():
+        return
+      time.sleep(interval)
+    raise TimeoutError("subscriber did not connect")
