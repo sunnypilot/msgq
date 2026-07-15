@@ -2,24 +2,20 @@ import os
 import platform
 import subprocess
 import sysconfig
-import numpy as np
+import catch2
 
 arch = subprocess.check_output(["uname", "-m"], encoding='utf8').rstrip()
 if platform.system() == "Darwin":
   arch = "Darwin"
 
-common = ''
+common = []
 
 cpppath = [
-  f"#/",
+  catch2.INCLUDE_DIR,
+  "#/",
   '#msgq/',
   '/usr/lib/include',
-  '/opt/homebrew/include',
   sysconfig.get_paths()['include'],
-]
-
-libpath = [
-  '/opt/homebrew/lib',
 ]
 
 AddOption('--minimal',
@@ -51,15 +47,13 @@ elif GetOption('asan'):
 
 env = Environment(
   ENV=os.environ,
-  CC='clang',
-  CXX='clang++',
   CCFLAGS=[
     "-g",
     "-fPIC",
     "-O2",
     "-Wunused",
     "-Werror",
-    "-Wshadow",
+    "-Wshadow" if arch == "Darwin" else "-Wshadow=local",
     "-Wno-vla-cxx-extension",
     "-Wno-unknown-warning-option",
   ] + ccflags,
@@ -69,7 +63,6 @@ env = Environment(
   CFLAGS="-std=gnu11",
   CXXFLAGS="-std=c++1z",
   CPPPATH=cpppath,
-  LIBPATH=libpath,
   CYTHONCFILESUFFIX=".cpp",
   tools=["default", "cython"]
 )
@@ -77,8 +70,7 @@ env = Environment(
 Export('env', 'arch', 'common')
 
 envCython = env.Clone(LIBS=[])
-envCython["CPPPATH"] += [np.get_include()]
-envCython["CCFLAGS"] += ["-Wno-#warnings", "-Wno-shadow", "-Wno-deprecated-declarations"]
+envCython["CCFLAGS"] += ["-Wno-#warnings", "-Wno-cpp", "-Wno-shadow", "-Wno-deprecated-declarations"]
 envCython["CCFLAGS"].remove('-Werror')
 if arch == "Darwin":
   envCython["LINKFLAGS"] = ["-bundle", "-undefined", "dynamic_lookup"]
